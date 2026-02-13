@@ -1,0 +1,11 @@
+{
+  "camera_index": 0,
+  "frame_width": 640,
+  "frame_height": 480,
+  "fps_limit": 24,
+  "dwell_seconds": 0.05,
+  "smooth_alpha": 0.52,
+  "head_sensitivity": 1.15,
+  "screen_order": "auto",
+  "cursor_scale": 1.0
+}
