@@ -1,4 +1,4 @@
-# ScreenGaze
+# ScreenGaze (Compatible with Linux Distro)
 
 Move your cursor to the screen you're looking at. Uses your webcam and head pose to switch between monitors—no need to drag the mouse.
 
