@@ -12,6 +12,29 @@ from pathlib import Path
 
 from screeninfo import get_monitors
 
+CALIBRATION_FILENAME = "calibration.json"
+CALIBRATION_CAPTURE_SEC = 1.5
+CALIBRATION_MIN_SAMPLES = 20
+
+
+def _draw_text_panel(frame, lines: list[str], y_start: int = 40, line_height: int = 52, font_scale: float = 1.0, thickness: int = 2):
+    """Draw readable text on a dark panel. lines = list of strings."""
+    import cv2
+    h, w = frame.shape[:2]
+    n = len(lines)
+    pad = 24
+    panel_h = n * line_height + pad * 2
+    panel_w = min(w - 80, 700)
+    x1, y1 = (w - panel_w) // 2, y_start
+    x2, y2 = x1 + panel_w, y1 + panel_h
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (40, 40, 50), -1)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (80, 80, 100), 2)
+    for i, line in enumerate(lines):
+        y = y1 + pad + (i + 1) * line_height - 12
+        # Shadow for readability
+        cv2.putText(frame, line, (x1 + pad + 2, y + 2), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness + 2)
+        cv2.putText(frame, line, (x1 + pad, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness)
+
 
 def move_cursor(x: int, y: int) -> bool:
     xdotool = shutil.which("xdotool")
@@ -66,10 +89,6 @@ def center_of_region(x: int, y: int, w: int, h: int) -> tuple[int, int]:
 
 
 NOSE_TIP_IDX = 4
-LEFT_EYE_OUTER = 33
-LEFT_EYE_INNER = 133
-RIGHT_EYE_OUTER = 362
-RIGHT_EYE_INNER = 263
 FACE_LANDMARKER_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 )
@@ -99,6 +118,36 @@ def init_face_mesh():
     return mp.tasks.vision.FaceLandmarker.create_from_options(options)
 
 
+def project_dir() -> Path:
+    """Always the directory containing this script (for calibration.json)."""
+    return Path(__file__).resolve().parent
+
+
+def calibration_path() -> Path:
+    return project_dir() / CALIBRATION_FILENAME
+
+
+def load_calibration(num_screens: int) -> list[float] | None:
+    path = calibration_path()
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        refs = data.get("refs")
+        if isinstance(refs, list) and len(refs) == num_screens and all(isinstance(r, (int, float)) for r in refs):
+            return [float(r) for r in refs]
+    except (json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
+def save_calibration(refs: list[float], num_screens: int) -> None:
+    path = calibration_path()
+    with open(path, "w") as f:
+        json.dump({"refs": refs, "num_screens": num_screens}, f, indent=2)
+
+
 def get_head_turn_norm_x(frame, face_landmarker, sensitivity: float = 1.0, frame_timestamp_ms: int = 0) -> float | None:
     import cv2
     import mediapipe as mp
@@ -119,134 +168,170 @@ def get_head_turn_norm_x(frame, face_landmarker, sensitivity: float = 1.0, frame
     return norm_x
 
 
-def is_wearing_glasses(frame, lm_list) -> bool:
-    """
-    Detect if user is wearing glasses by analyzing the eye region in the frame.
-    Uses edge detection to look for glasses frames (horizontal lines across eyes).
-    """
-    try:
-        import cv2
-        import numpy as np
-        
+def show_calibration_choice(cap, num_screens: int) -> str:
+    """Show pop-up: C=Calibrate, S=Use saved, D=Defaults. Returns 'calibrate'|'saved'|'defaults'."""
+    import cv2
+    window_name = "ScreenGaze — Setup"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    has_saved = load_calibration(num_screens) is not None
+    while True:
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            continue
         h, w = frame.shape[:2]
-        
-        # Get eye region landmarks
-        left_eye_outer = lm_list[LEFT_EYE_OUTER]
-        left_eye_inner = lm_list[LEFT_EYE_INNER]
-        right_eye_outer = lm_list[RIGHT_EYE_OUTER]
-        right_eye_inner = lm_list[RIGHT_EYE_INNER]
-        
-        # Convert normalized coordinates to pixel coordinates
-        left_eye_x = int(left_eye_outer.x * w)
-        left_eye_y = int(left_eye_outer.y * h)
-        right_eye_x = int(right_eye_inner.x * w)
-        right_eye_y = int(right_eye_inner.y * h)
-        
-        # Define eye region (covering both eyes with some padding)
-        eye_y_min = min(left_eye_y, right_eye_y) - 40
-        eye_y_max = max(left_eye_y, right_eye_y) + 40
-        eye_x_min = left_eye_x - 40
-        eye_x_max = int(right_eye_inner.x * w) + 40
-        
-        # Ensure bounds
-        eye_y_min = max(0, eye_y_min)
-        eye_y_max = min(h, eye_y_max)
-        eye_x_min = max(0, eye_x_min)
-        eye_x_max = min(w, eye_x_max)
-        
-        if eye_x_max <= eye_x_min or eye_y_max <= eye_y_min:
-            return False
-        
-        # Extract eye region
-        eye_region = frame[eye_y_min:eye_y_max, eye_x_min:eye_x_max]
-        
-        # Convert to grayscale
-        gray = cv2.cvtColor(eye_region, cv2.COLOR_BGR2GRAY)
-        
-        # Apply Gaussian blur
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        
-        # Edge detection using Canny
-        edges = cv2.Canny(blurred, 50, 150)
-        
-        # Look for horizontal lines (glasses frames typically create horizontal edges)
-        # Use morphological operations to enhance horizontal lines
-        kernel_horizontal = np.ones((1, 15), np.uint8)
-        horizontal_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, kernel_horizontal, iterations=2)
-        
-        # Count horizontal line pixels
-        horizontal_pixels = np.sum(horizontal_lines > 0)
-        total_pixels = horizontal_lines.shape[0] * horizontal_lines.shape[1]
-        horizontal_ratio = horizontal_pixels / total_pixels
-        
-        # Also check for strong vertical edges on sides (temples of glasses)
-        kernel_vertical = np.ones((15, 1), np.uint8)
-        vertical_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, kernel_vertical, iterations=2)
-        vertical_pixels = np.sum(vertical_lines > 0)
-        vertical_ratio = vertical_pixels / total_pixels
-        
-        # Check for frame-like structures (rectangular shapes)
-        # Use contour detection
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        frame_like_contours = 0
-        for cnt in contours:
-            x, y, cw, ch = cv2.boundingRect(cnt)
-            aspect_ratio = float(cw)/ch if ch > 0 else 0
-            # Glasses frames are typically wider than tall
-            if aspect_ratio > 2.0 and cw > 30 and ch > 5:
-                frame_like_contours += 1
-        
-        # Detection logic: combination of horizontal lines and frame-like contours
-        # Glasses typically produce strong horizontal edges (top/bottom of frames)
-        has_horizontal_frame = horizontal_ratio > 0.02  # At least 2% horizontal edges
-        has_frame_structure = frame_like_contours >= 1  # At least one frame-like contour
-        
-        # Additional check: intensity variation in eye region
-        # Glasses create distinct bright/dark patterns
-        std_dev = np.std(gray)
-        has_texture = std_dev > 30  # Significant texture variation
-        
-        wearing_glasses = bool((has_horizontal_frame and has_frame_structure) or \
-                         (horizontal_ratio > 0.03 and has_texture))
-        
-        return wearing_glasses
-        
-    except Exception as e:
-        # If detection fails, default to not wearing glasses
-        return False
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (w, h), (30, 30, 40), -1)
+        cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
+        lines = [
+            "ScreenGaze  Setup",
+            "",
+            "  C   Calibrate now (map your face to each screen)",
+            "  S   Use saved calibration" if has_saved else "  D  — Defaults (no calibration)",
+            "  D   Defaults (no calibration)" if has_saved else "",
+        ]
+        lines = [s for s in lines if s]
+        _draw_text_panel(frame, lines, y_start=60, line_height=48, font_scale=0.95, thickness=2)
+        cv2.imshow(window_name, frame)
+        key = cv2.waitKey(50)
+        if key == -1:
+            continue
+        k = key & 0xFF
+        if k == ord("c") or k == ord("C"):
+            cv2.destroyWindow(window_name)
+            return "calibrate"
+        if has_saved and (k == ord("s") or k == ord("S")):
+            cv2.destroyWindow(window_name)
+            return "saved"
+        if k == ord("d") or k == ord("D"):
+            cv2.destroyWindow(window_name)
+            return "defaults"
+        if key == 27:
+            cv2.destroyWindow(window_name)
+            return "defaults"
+    return "defaults"
 
 
-def send_notification(message: str) -> None:
-    """Send desktop notification."""
-    try:
-        # Try notify-send first (most Linux desktops)
-        subprocess.run(
-            ["notify-send", "ScreenGaze", message, "-u", "normal", "-t", "5000"],
-            capture_output=True,
-            timeout=5,
-        )
-    except:
-        # Fallback to zenity
-        try:
-            subprocess.run(
-                ["zenity", "--info", "--text", message, "--title", "ScreenGaze"],
-                capture_output=True,
-                timeout=5,
-            )
-        except:
-            pass
+def run_calibration(
+    cap,
+    face_landmarker,
+    config: dict,
+    cursor_positions: list[tuple[int, int]],
+    scaled_pos: callable,
+    num_screens: int,
+) -> list[float]:
+    import cv2
+    sensitivity = config.get("head_sensitivity", 1.15)
+    fps = max(10, config.get("fps_limit", 24))
+    frame_dt = 1.0 / fps
+    labels = ["Left", "Right"] if num_screens == 2 else ["Left", "Middle", "Right"]
+    refs: list[float] = []
+    window_name = "ScreenGaze — Calibration"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    capture_frames = max(CALIBRATION_MIN_SAMPLES, int(CALIBRATION_CAPTURE_SEC * fps))
+    frame_ts_ms = 0
+    ms_per_frame = max(1, int(1000 // fps))
+
+    for step in range(num_screens):
+        move_cursor(*scaled_pos(step))
+        waiting = True
+        while waiting:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            frame_ts_ms += ms_per_frame
+            h, w = frame.shape[:2]
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (0, 0), (w, h), (35, 35, 45), -1)
+            cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+            _draw_text_panel(frame, [
+                f"Step {step + 1} of {num_screens}",
+                f"Look at your {labels[step]} screen.",
+                "",
+                "Press SPACE when ready to capture.",
+            ], y_start=50, line_height=50, font_scale=1.0, thickness=2)
+            nx = get_head_turn_norm_x(frame, face_landmarker, sensitivity, frame_ts_ms)
+            if nx is None:
+                _draw_text_panel(frame, ["Position your face in the camera view"], y_start=h // 2 - 40, line_height=44, font_scale=0.9)
+            cv2.putText(frame, "ESC = cancel", (30, h - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 180, 190), 2)
+            cv2.imshow(window_name, frame)
+            key = cv2.waitKey(30)
+            if key != -1:
+                k = key & 0xFF
+                if k == ord(" "):
+                    waiting = False
+                elif k == 27:
+                    cv2.destroyAllWindows()
+                    raise SystemExit(0)
+
+        samples: list[float] = []
+        for c in range(capture_frames):
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            frame_ts_ms += ms_per_frame
+            nx = get_head_turn_norm_x(frame, face_landmarker, sensitivity, frame_ts_ms)
+            if nx is not None:
+                samples.append(nx)
+            h, w = frame.shape[:2]
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (0, 0), (w, h), (40, 42, 55), -1)
+            cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+            progress = (c + 1) / capture_frames
+            _draw_text_panel(frame, [f"Capturing {labels[step]}...", ""], y_start=60, line_height=46, font_scale=1.05)
+            bar_y = 200
+            cv2.rectangle(frame, (80, bar_y), (w - 80, bar_y + 24), (50, 50, 60), -1)
+            cv2.rectangle(frame, (80, bar_y), (80 + int((w - 160) * progress), bar_y + 24), (60, 140, 220), -1)
+            cv2.rectangle(frame, (80, bar_y), (w - 80, bar_y + 24), (90, 90, 110), 1)
+            cv2.imshow(window_name, frame)
+            cv2.waitKey(max(1, int(frame_dt * 1000)))
+
+        if samples:
+            refs.append(sum(samples) / len(samples))
+        else:
+            refs.append((step + 0.5) / num_screens)
+
+    # Show "Calibration complete" then transition to tracker
+    for _ in range(30):
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            continue
+        h, w = frame.shape[:2]
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (w, h), (25, 35, 50), -1)
+        cv2.addWeighted(overlay, 0.9, frame, 0.1, 0, frame)
+        _draw_text_panel(frame, ["Calibration complete!", "Starting tracker..."], y_start=h // 2 - 60, line_height=56, font_scale=1.15)
+        cv2.imshow(window_name, frame)
+        if cv2.waitKey(50) == 27:
+            break
+    cv2.destroyAllWindows()
+    save_calibration(refs, num_screens)
+    return refs
 
 
 class ScreenSelector:
-    def __init__(self, dwell_seconds: float, smooth_alpha: float, num_screens: int):
+    def __init__(self, dwell_seconds: float, smooth_alpha: float, num_screens: int, calibration_refs: list[float] | None = None):
         self.dwell_seconds = dwell_seconds
         self.smooth_alpha = smooth_alpha
         self.num_screens = num_screens
+        self._refs = calibration_refs if calibration_refs and len(calibration_refs) == num_screens else None
         self._smooth_x: float | None = None
         self._current_screen = 0
         self._target_screen = 0
         self._since_change = 0.0
+
+    def _screen_from_x(self, x: float) -> int:
+        if self._refs is not None:
+            best = 0
+            best_d = abs(x - self._refs[0])
+            for i in range(1, len(self._refs)):
+                d = abs(x - self._refs[i])
+                if d < best_d:
+                    best_d = d
+                    best = i
+            return best
+        if self.num_screens == 2:
+            return 0 if x < 0.5 else 1
+        return min(int(x * self.num_screens), self.num_screens - 1)
 
     def update(self, norm_x: float | None, dt: float) -> int:
         if norm_x is None:
@@ -255,16 +340,7 @@ class ScreenSelector:
             self._smooth_x = norm_x
         else:
             self._smooth_x = self.smooth_alpha * self._smooth_x + (1.0 - self.smooth_alpha) * norm_x
-        # Map to screen index
-        t = self._smooth_x
-        if self.num_screens == 2:
-            self._target_screen = 0 if t < 0.5 else 1
-        else:
-            self._target_screen = min(
-                int(t * self.num_screens),
-                self.num_screens - 1,
-            )
-        # Very short dwell so a neck turn switches quickly
+        self._target_screen = self._screen_from_x(self._smooth_x)
         if self._target_screen != self._current_screen:
             self._since_change += dt
             if self._since_change >= self.dwell_seconds:
@@ -275,16 +351,16 @@ class ScreenSelector:
         return self._current_screen
 
 
-def run(config_path: Path, no_preview: bool) -> None:
+def run(config_path: Path, no_preview: bool, force_calibrate: bool = False) -> None:
     import cv2
     config = load_config(config_path)
     camera_index = config.get("camera_index", 0)
     frame_w = config.get("frame_width", 640)
     frame_h = config.get("frame_height", 480)
-    fps_limit = config.get("fps_limit", 15)
-    dwell_seconds = config.get("dwell_seconds", 0.06)
-    smooth_alpha = config.get("smooth_alpha", 0.35)
-    head_sensitivity = config.get("head_sensitivity", 1.2)
+    fps_limit = config.get("fps_limit", 24)
+    dwell_seconds = config.get("dwell_seconds", 0.05)
+    smooth_alpha = config.get("smooth_alpha", 0.52)
+    head_sensitivity = config.get("head_sensitivity", 1.15)
     screen_order = config.get("screen_order", "auto")
     cursor_scale = config.get("cursor_scale", 1.0)
 
@@ -293,17 +369,18 @@ def run(config_path: Path, no_preview: bool) -> None:
         print("Need at least 2 monitors. Found:", len(monitors), file=sys.stderr)
         sys.exit(1)
 
-    print("Monitor order (left → middle → right):")
-    for i, (x, y, w, h) in enumerate(monitors):
-        cx, cy = center_of_region(x, y, w, h)
-        print(f"  Screen {i}: ({x}, {y}) size {w}x{h}  → cursor target ({cx}, {cy})")
-
-    # Build list of (cx, cy) per screen for cursor target
+    num_screens = len(monitors)
     cursor_positions = [center_of_region(*m) for m in monitors]
 
     def scaled_pos(i: int) -> tuple[int, int]:
         cx, cy = cursor_positions[i]
         return (int(cx * cursor_scale), int(cy * cursor_scale))
+
+    if not shutil.which("xdotool"):
+        print("xdotool is required for cursor movement. Install it, e.g.:", file=sys.stderr)
+        print("  Fedora/RHEL: sudo dnf install xdotool", file=sys.stderr)
+        print("  Debian/Ubuntu: sudo apt install xdotool", file=sys.stderr)
+        sys.exit(1)
 
     cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
@@ -311,32 +388,41 @@ def run(config_path: Path, no_preview: bool) -> None:
         sys.exit(1)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, frame_w)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_h)
-
-    if not shutil.which("xdotool"):
-        print("xdotool is required for cursor movement. Install it, e.g.:", file=sys.stderr)
-        print("  Fedora/RHEL: sudo dnf install xdotool", file=sys.stderr)
-        print("  Debian/Ubuntu: sudo apt install xdotool", file=sys.stderr)
-        sys.exit(1)
-    move_cursor(*scaled_pos(0))
     face_mesh = init_face_mesh()
-    selector = ScreenSelector(dwell_seconds, smooth_alpha, len(cursor_positions))
+
+    calibration_refs: list[float] | None = None
+    if force_calibrate:
+        print("Calibration: follow the on-screen steps.")
+        calibration_refs = run_calibration(cap, face_mesh, config, cursor_positions, scaled_pos, num_screens)
+        face_mesh = init_face_mesh()  # fresh instance so main loop timestamps start from 0
+        print("Calibration saved. Starting tracker...")
+    else:
+        choice = show_calibration_choice(cap, num_screens)
+        if choice == "calibrate":
+            calibration_refs = run_calibration(cap, face_mesh, config, cursor_positions, scaled_pos, num_screens)
+            face_mesh = init_face_mesh()  # fresh instance so main loop timestamps start from 0
+            print("Calibration saved. Starting tracker...")
+        elif choice == "saved":
+            calibration_refs = load_calibration(num_screens)
+            if calibration_refs is None:
+                calibration_refs = None
+                print("Using defaults.")
+            else:
+                print("Using saved calibration for mapping.")
+        else:
+            calibration_refs = None
+            print("Using default screen mapping.")
+
+    move_cursor(*scaled_pos(0))
+    selector = ScreenSelector(dwell_seconds, smooth_alpha, num_screens, calibration_refs)
 
     frame_dt = 1.0 / fps_limit if fps_limit else 0.05
     last_time = time.perf_counter()
-    window_name = "Face tracker (q=quit)"
+    tracker_window = "ScreenGaze — Tracker"
+    cv2.namedWindow(tracker_window, cv2.WINDOW_NORMAL)
     last_screen_index: int | None = None
     frame_timestamp_ms = 0
     ms_per_frame = max(1, int(1000 / fps_limit)) if fps_limit else 33
-    
-    # Glasses reminder timer
-    glasses_reminder_enabled = config.get("enable_glasses_reminder", True)
-    GLASSES_REMINDER_INTERVAL = config.get("glasses_reminder_interval", 120)  # seconds
-    glasses_check_timer = 0.0
-    last_glasses_notification = 0.0
-    wearing_glasses = False
-    glasses_detection_frames = 0
-    frames_without_glasses = 0
-    FRAMES_TO_CONFIRM = 10  # Need 10 consecutive frames to confirm glasses status
 
     try:
         while True:
@@ -351,68 +437,7 @@ def run(config_path: Path, no_preview: bool) -> None:
             if not ok or frame is None:
                 continue
 
-            import cv2
-            import mediapipe as mp
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            result = face_mesh.detect_for_video(mp_image, frame_timestamp_ms)
-            
-            # Get norm_x from the same result
-            norm_x = None
-            if result.face_landmarks:
-                lm_list = result.face_landmarks[0]
-                nose = lm_list[NOSE_TIP_IDX]
-                xs = [p.x for p in lm_list]
-                left_x, right_x = min(xs), max(xs)
-                face_center_x = (left_x + right_x) * 0.5
-                face_half_width = max((right_x - left_x) * 0.5, 1e-6)
-                yaw_proxy = (nose.x - face_center_x) / face_half_width
-                yaw_proxy = max(-1.0, min(1.0, yaw_proxy * head_sensitivity))
-                norm_x = 0.5 - 0.5 * yaw_proxy
-            
-            # Glasses detection using the same result
-            face_detected = False
-            if result.face_landmarks:
-                face_detected = True
-                lm_list = result.face_landmarks[0]
-                currently_wearing = is_wearing_glasses(frame, lm_list)
-                
-                if currently_wearing:
-                    glasses_detection_frames += 1
-                    frames_without_glasses = 0
-                else:
-                    frames_without_glasses += 1
-                    glasses_detection_frames = 0
-                
-                # Confirm glasses status after FRAMES_TO_CONFIRM consecutive frames
-                if glasses_detection_frames >= FRAMES_TO_CONFIRM:
-                    wearing_glasses = True
-                elif frames_without_glasses >= FRAMES_TO_CONFIRM:
-                    wearing_glasses = False
-            else:
-                # No face detected, reset counters
-                glasses_detection_frames = 0
-                frames_without_glasses = 0
-            
-            # Check if we need to send glasses reminder
-            if glasses_reminder_enabled:
-                glasses_check_timer += dt
-                time_remaining = GLASSES_REMINDER_INTERVAL - glasses_check_timer
-                
-                # Debug output every 10 seconds
-                if int(glasses_check_timer) % 10 == 0 and int(glasses_check_timer) > 0:
-                    print(f"[DEBUG] Glasses check timer: {glasses_check_timer:.1f}s / {GLASSES_REMINDER_INTERVAL}s")
-                    print(f"[DEBUG] Wearing glasses: {wearing_glasses}, Face detected: {face_detected}")
-                
-                if glasses_check_timer >= GLASSES_REMINDER_INTERVAL:
-                    print(f"[DEBUG] Timer triggered! Wearing glasses: {wearing_glasses}")
-                    glasses_check_timer = 0.0
-                    if not wearing_glasses:
-                        print("[DEBUG] Sending notification...")
-                        send_notification("👓 Time to wear your computer glasses! Protect your eyes.")
-                        last_glasses_notification = now
-                        print("[DEBUG] Notification sent!")
-            
+            norm_x = get_head_turn_norm_x(frame, face_mesh, head_sensitivity, frame_timestamp_ms)
             screen_index = selector.update(norm_x, dt)
 
             if screen_index != last_screen_index and screen_index < len(cursor_positions):
@@ -439,32 +464,12 @@ def run(config_path: Path, no_preview: bool) -> None:
                     dot_x = max(bar_margin + 6, min(w - bar_margin - 6, dot_x))
                     cv2.circle(frame, (dot_x, bar_y + bar_h // 2), 5, (0, 255, 220), -1)
                     cv2.circle(frame, (dot_x, bar_y + bar_h // 2), 5, (255, 255, 255), 1)
-                labels = ["Left", "Middle", "Right"][:n]
-                
-                # Glasses status indicator and timer
-                glasses_status = "👓 ON" if wearing_glasses else "👓 OFF"
-                glasses_color = (0, 255, 0) if wearing_glasses else (0, 0, 255)
-                cv2.putText(
-                    frame, glasses_status, (w - 100, 24),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, glasses_color, 2,
-                )
-                
-                # Show reminder timer
-                if glasses_reminder_enabled:
-                    remaining = max(0, GLASSES_REMINDER_INTERVAL - glasses_check_timer)
-                    timer_text = f"⏰ {int(remaining)}s"
-                    timer_color = (0, 255, 255) if remaining > 30 else (0, 165, 255) if remaining > 10 else (0, 0, 255)
-                    cv2.putText(
-                        frame, timer_text, (w - 200, 24),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, timer_color, 2,
-                    )
-                
-                cv2.putText(
-                    frame, "Screen: %s  (q=quit)" % labels[screen_index], (12, 24),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2,
-                )
-                
-                cv2.imshow(window_name, frame)
+                labels = ["Left", "Right"] if n == 2 else ["Left", "Middle", "Right"]
+                cv2.rectangle(frame, (8, 8), (220, 42), (45, 45, 55), -1)
+                cv2.rectangle(frame, (8, 8), (220, 42), (90, 90, 110), 1)
+                cv2.putText(frame, "Screen: %s" % labels[screen_index], (16, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+                cv2.putText(frame, "q = quit", (w - 100, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 210), 2)
+                cv2.imshow(tracker_window, frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
     finally:
@@ -491,11 +496,12 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=Path(__file__).resolve().parent / "config.json")
     parser.add_argument("--no-preview", action="store_true", help="Run without camera preview window")
     parser.add_argument("--list-monitors", action="store_true", help="Print monitor layout and exit")
+    parser.add_argument("--calibrate", action="store_true", help="Run calibration wizard and save (then start tracker)")
     args = parser.parse_args()
     if args.list_monitors:
         list_monitors()
         return
-    run(args.config, args.no_preview)
+    run(args.config, args.no_preview, args.calibrate)
 
 
 if __name__ == "__main__":
