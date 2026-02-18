@@ -17,23 +17,118 @@ CALIBRATION_CAPTURE_SEC = 1.5
 CALIBRATION_MIN_SAMPLES = 20
 
 
-def _draw_text_panel(frame, lines: list[str], y_start: int = 40, line_height: int = 52, font_scale: float = 1.0, thickness: int = 2):
-    """Draw readable text on a dark panel. lines = list of strings."""
+def _draw_text_panel(frame, lines: list[str], y_start: int = 60, line_height: int = 60, font_scale: float = 1.1, thickness: int = 2, title: str | None = None):
+    """Draw readable text on a dark panel with modern styling. Optimized for visibility."""
     import cv2
     h, w = frame.shape[:2]
     n = len(lines)
-    pad = 24
-    panel_h = n * line_height + pad * 2
-    panel_w = min(w - 80, 700)
-    x1, y1 = (w - panel_w) // 2, y_start
-    x2, y2 = x1 + panel_w, y1 + panel_h
-    cv2.rectangle(frame, (x1, y1), (x2, y2), (40, 40, 50), -1)
-    cv2.rectangle(frame, (x1, y1), (x2, y2), (80, 80, 100), 2)
+    pad_x = 40
+    pad_y = 35
+    
+    # Calculate panel dimensions
+    panel_w = min(w - 60, 700)
+    x1 = (w - panel_w) // 2
+    x2 = x1 + panel_w
+    
+    # Calculate total height needed
+    total_height = pad_y * 2
+    if title:
+        total_height += line_height + 20
+    total_height += n * line_height
+    
+    # Ensure panel fits within frame
+    y1 = min(y_start, h - total_height - 20)
+    y1 = max(20, y1)
+    y2 = y1 + total_height
+    
+    # Draw solid background with high contrast
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (30, 33, 40), -1)
+    
+    # Draw bright border
+    border_color = (100, 160, 255)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), border_color, 2)
+    
+    # Draw title if provided
+    current_y = y1 + pad_y
+    if title:
+        title_scale = font_scale * 1.3
+        title_thickness = thickness + 1
+        (title_w, title_h), _ = cv2.getTextSize(title, cv2.FONT_HERSHEY_DUPLEX, title_scale, title_thickness)
+        title_x = x1 + (panel_w - title_w) // 2
+        title_y = current_y + title_h
+        
+        # Title with strong contrast - bright cyan/blue
+        cv2.putText(frame, title, (title_x, title_y), cv2.FONT_HERSHEY_DUPLEX, title_scale, (0, 0, 0), title_thickness + 2)
+        cv2.putText(frame, title, (title_x, title_y), cv2.FONT_HERSHEY_DUPLEX, title_scale, (120, 200, 255), title_thickness)
+        
+        # Underline
+        line_y = title_y + 12
+        cv2.line(frame, (x1 + 60, line_y), (x2 - 60, line_y), (100, 160, 255), 2)
+        current_y = line_y + 25
+    
+    # Draw lines with better formatting
     for i, line in enumerate(lines):
-        y = y1 + pad + (i + 1) * line_height - 12
-        # Shadow for readability
-        cv2.putText(frame, line, (x1 + pad + 2, y + 2), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness + 2)
-        cv2.putText(frame, line, (x1 + pad, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness)
+        if not line or not line.strip():
+            continue
+        
+        y = current_y + i * line_height
+        
+        # Check if line has a shortcut key format like "C   Description"
+        stripped = line.strip()
+        if len(stripped) >= 2 and stripped[0] in 'CSD' and stripped[1:3] == '  ':
+            # Split into key and description
+            key = stripped[0]
+            desc = stripped[2:].lstrip()
+            
+            # Draw key in bright yellow/orange with background
+            key_x = x1 + pad_x
+            key_w = 35
+            key_h = line_height - 10
+            
+            # Key background (small box)
+            cv2.rectangle(frame, (key_x, y - key_h + 5), (key_x + key_w, y + 5), (60, 60, 70), -1)
+            cv2.rectangle(frame, (key_x, y - key_h + 5), (key_x + key_w, y + 5), (100, 100, 110), 1)
+            
+            # Draw key letter centered
+            (k_w, k_h), _ = cv2.getTextSize(key, cv2.FONT_HERSHEY_SIMPLEX, font_scale * 1.1, thickness + 1)
+            kx = key_x + (key_w - k_w) // 2
+            ky = y - (key_h // 2) + 3
+            cv2.putText(frame, key, (kx, ky), cv2.FONT_HERSHEY_SIMPLEX, font_scale * 1.1, (0, 0, 0), thickness + 2)
+            cv2.putText(frame, key, (kx, ky), cv2.FONT_HERSHEY_SIMPLEX, font_scale * 1.1, (255, 200, 80), thickness + 1)
+            
+            # Draw description
+            desc_x = key_x + key_w + 20
+            cv2.putText(frame, desc, (desc_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness + 2)
+            cv2.putText(frame, desc, (desc_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (240, 240, 250), thickness)
+        elif stripped.startswith('ESC'):
+            # ESC key special handling
+            key = 'ESC'
+            desc = stripped[3:].lstrip() if len(stripped) > 3 else ''
+            
+            key_x = x1 + pad_x
+            key_w = 60
+            key_h = line_height - 10
+            
+            # Key background
+            cv2.rectangle(frame, (key_x, y - key_h + 5), (key_x + key_w, y + 5), (60, 60, 70), -1)
+            cv2.rectangle(frame, (key_x, y - key_h + 5), (key_x + key_w, y + 5), (100, 100, 110), 1)
+            
+            # Draw key
+            (k_w, k_h), _ = cv2.getTextSize(key, cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.9, thickness)
+            kx = key_x + (key_w - k_w) // 2
+            ky = y - (key_h // 2) + 3
+            cv2.putText(frame, key, (kx, ky), cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.9, (0, 0, 0), thickness + 2)
+            cv2.putText(frame, key, (kx, ky), cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.9, (255, 200, 80), thickness)
+            
+            # Draw description if any
+            if desc:
+                desc_x = key_x + key_w + 20
+                cv2.putText(frame, desc, (desc_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness + 2)
+                cv2.putText(frame, desc, (desc_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (240, 240, 250), thickness)
+        else:
+            # Regular line
+            cv2.putText(frame, line, (x1 + pad_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness + 2)
+            cv2.putText(frame, line, (x1 + pad_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (240, 240, 250), thickness)
 
 
 def move_cursor(x: int, y: int) -> bool:
@@ -168,11 +263,27 @@ def get_head_turn_norm_x(frame, face_landmarker, sensitivity: float = 1.0, frame
     return norm_x
 
 
+def _center_window(window_name: str, width: int, height: int):
+    """Center an OpenCV window on the primary monitor."""
+    import cv2
+    monitors = list(get_monitors())
+    if monitors:
+        primary = monitors[0]
+        x = primary.x + (primary.width - width) // 2
+        y = primary.y + (primary.height - height) // 2
+    else:
+        x, y = 100, 100
+    cv2.moveWindow(window_name, x, y)
+
+
 def show_calibration_choice(cap, num_screens: int) -> str:
     """Show pop-up: C=Calibrate, S=Use saved, D=Defaults. Returns 'calibrate'|'saved'|'defaults'."""
     import cv2
     window_name = "ScreenGaze — Setup"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
+    cv2.resizeWindow(window_name, 900, 650)
+    _center_window(window_name, 900, 650)
     has_saved = load_calibration(num_screens) is not None
     while True:
         ok, frame = cap.read()
@@ -183,14 +294,13 @@ def show_calibration_choice(cap, num_screens: int) -> str:
         cv2.rectangle(overlay, (0, 0), (w, h), (30, 30, 40), -1)
         cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
         lines = [
-            "ScreenGaze  Setup",
-            "",
-            "  C   Calibrate now (map your face to each screen)",
-            "  S   Use saved calibration" if has_saved else "  D  — Defaults (no calibration)",
-            "  D   Defaults (no calibration)" if has_saved else "",
+            "C   Calibrate now (map your face to each screen)",
+            "S   Use saved calibration" if has_saved else "D   Defaults (no calibration)",
         ]
-        lines = [s for s in lines if s]
-        _draw_text_panel(frame, lines, y_start=60, line_height=48, font_scale=0.95, thickness=2)
+        if has_saved:
+            lines.append("D   Defaults (no calibration)")
+        lines.append("ESC   Exit")
+        _draw_text_panel(frame, lines, y_start=150, line_height=65, font_scale=1.0, thickness=2, title="ScreenGaze Setup")
         cv2.imshow(window_name, frame)
         key = cv2.waitKey(50)
         if key == -1:
@@ -216,7 +326,7 @@ def run_calibration(
     face_landmarker,
     config: dict,
     cursor_positions: list[tuple[int, int]],
-    scaled_pos: callable,
+    scaled_pos,
     num_screens: int,
 ) -> list[float]:
     import cv2
@@ -227,6 +337,9 @@ def run_calibration(
     refs: list[float] = []
     window_name = "ScreenGaze — Calibration"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
+    cv2.resizeWindow(window_name, 900, 700)
+    _center_window(window_name, 900, 700)
     capture_frames = max(CALIBRATION_MIN_SAMPLES, int(CALIBRATION_CAPTURE_SEC * fps))
     frame_ts_ms = 0
     ms_per_frame = max(1, int(1000 // fps))
@@ -244,15 +357,15 @@ def run_calibration(
             cv2.rectangle(overlay, (0, 0), (w, h), (35, 35, 45), -1)
             cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
             _draw_text_panel(frame, [
-                f"Step {step + 1} of {num_screens}",
-                f"Look at your {labels[step]} screen.",
-                "",
-                "Press SPACE when ready to capture.",
-            ], y_start=50, line_height=50, font_scale=1.0, thickness=2)
+                f"Look at your {labels[step]} monitor",
+                "SPACE   Capture your head position",
+            ], y_start=180, line_height=70, font_scale=1.1, thickness=2, title=f"Step {step + 1} of {num_screens}")
             nx = get_head_turn_norm_x(frame, face_landmarker, sensitivity, frame_ts_ms)
             if nx is None:
-                _draw_text_panel(frame, ["Position your face in the camera view"], y_start=h // 2 - 40, line_height=44, font_scale=0.9)
-            cv2.putText(frame, "ESC = cancel", (30, h - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 180, 190), 2)
+                _draw_text_panel(frame, ["⚠️  Position your face in the camera view"], y_start=h // 2 + 40, line_height=44, font_scale=0.85)
+            # Status bar at bottom
+            cv2.rectangle(frame, (0, h - 40), (w, h), (30, 33, 42), -1)
+            cv2.putText(frame, "ESC   Cancel calibration", (30, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (150, 150, 160), 1)
             cv2.imshow(window_name, frame)
             key = cv2.waitKey(30)
             if key != -1:
@@ -277,11 +390,22 @@ def run_calibration(
             cv2.rectangle(overlay, (0, 0), (w, h), (40, 42, 55), -1)
             cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
             progress = (c + 1) / capture_frames
-            _draw_text_panel(frame, [f"Capturing {labels[step]}...", ""], y_start=60, line_height=46, font_scale=1.05)
-            bar_y = 200
-            cv2.rectangle(frame, (80, bar_y), (w - 80, bar_y + 24), (50, 50, 60), -1)
-            cv2.rectangle(frame, (80, bar_y), (80 + int((w - 160) * progress), bar_y + 24), (60, 140, 220), -1)
-            cv2.rectangle(frame, (80, bar_y), (w - 80, bar_y + 24), (90, 90, 110), 1)
+            _draw_text_panel(frame, [f"Hold still while capturing...", ""], y_start=80, line_height=46, font_scale=0.95, title=f"Capturing {labels[step]} Position")
+            # Progress bar
+            bar_y = h // 2 + 40
+            bar_height = 24
+            bar_width = min(500, w - 160)
+            bar_x = (w - bar_width) // 2
+            # Background
+            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), (45, 48, 58), -1)
+            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), (80, 85, 100), 1)
+            # Progress fill
+            fill_width = int(bar_width * progress)
+            cv2.rectangle(frame, (bar_x + 2, bar_y + 2), (bar_x + fill_width - 2, bar_y + bar_height - 2), (80, 150, 240), -1)
+            # Percentage text
+            pct_text = f"{int(progress * 100)}%"
+            text_x = bar_x + (bar_width - len(pct_text) * 12) // 2
+            cv2.putText(frame, pct_text, (text_x, bar_y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.imshow(window_name, frame)
             cv2.waitKey(max(1, int(frame_dt * 1000)))
 
@@ -297,9 +421,12 @@ def run_calibration(
             continue
         h, w = frame.shape[:2]
         overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (w, h), (25, 35, 50), -1)
+        cv2.rectangle(overlay, (0, 0), (w, h), (28, 35, 50), -1)
         cv2.addWeighted(overlay, 0.9, frame, 0.1, 0, frame)
-        _draw_text_panel(frame, ["Calibration complete!", "Starting tracker..."], y_start=h // 2 - 60, line_height=56, font_scale=1.15)
+        _draw_text_panel(frame, [
+            "All positions captured successfully",
+            "Starting head tracking now...",
+        ], y_start=200, line_height=70, font_scale=1.1, thickness=2, title="Calibration Complete")
         cv2.imshow(window_name, frame)
         if cv2.waitKey(50) == 27:
             break
@@ -420,6 +547,9 @@ def run(config_path: Path, no_preview: bool, force_calibrate: bool = False) -> N
     last_time = time.perf_counter()
     tracker_window = "ScreenGaze — Tracker"
     cv2.namedWindow(tracker_window, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(tracker_window, cv2.WND_PROP_TOPMOST, 1)
+    cv2.resizeWindow(tracker_window, 640, 480)
+    _center_window(tracker_window, 640, 480)
     last_screen_index: int | None = None
     frame_timestamp_ms = 0
     ms_per_frame = max(1, int(1000 / fps_limit)) if fps_limit else 33
@@ -447,28 +577,47 @@ def run(config_path: Path, no_preview: bool, force_calibrate: bool = False) -> N
             if not no_preview:
                 w, h = frame.shape[1], frame.shape[0]
                 n = len(cursor_positions)
-                bar_y, bar_h, bar_margin = h - 28, 22, 8
-                cv2.rectangle(frame, (bar_margin, bar_y), (w - bar_margin, bar_y + bar_h), (45, 45, 45), -1)
-                cv2.rectangle(frame, (bar_margin, bar_y), (w - bar_margin, bar_y + bar_h), (90, 90, 90), 1)
-                # Current screen highlight
+                
+                # Modern status bar at bottom
+                bar_y, bar_h, bar_margin = h - 36, 32, 12
+                # Bar background with rounded corners look
+                cv2.rectangle(frame, (bar_margin, bar_y), (w - bar_margin, bar_y + bar_h), (38, 40, 48), -1)
+                cv2.rectangle(frame, (bar_margin, bar_y), (w - bar_margin, bar_y + bar_h), (70, 75, 90), 1)
+                
+                # Current screen highlight with gradient effect
                 seg_w = (w - 2 * bar_margin) // n
                 cx0 = bar_margin + screen_index * seg_w
-                cv2.rectangle(frame, (cx0, bar_y), (cx0 + seg_w, bar_y + bar_h), (60, 120, 170), -1)
-                # Segment dividers
-                for i in range(1, n):
-                    x = bar_margin + seg_w * i
-                    cv2.line(frame, (x, bar_y), (x, bar_y + bar_h), (70, 70, 70), 1)
+                # Highlight box
+                cv2.rectangle(frame, (cx0 + 2, bar_y + 2), (cx0 + seg_w - 2, bar_y + bar_h - 2), (70, 140, 220), -1)
+                cv2.rectangle(frame, (cx0 + 2, bar_y + 2), (cx0 + seg_w - 2, bar_y + bar_h - 2), (100, 170, 240), 1)
+                
+                # Screen labels
+                labels = ["Left", "Right"] if n == 2 else ["Left", "Middle", "Right"]
+                for i in range(n):
+                    x = bar_margin + seg_w * i + seg_w // 2
+                    label = labels[i]
+                    # Center text
+                    text_w = len(label) * 9
+                    text_color = (255, 255, 255) if i == screen_index else (150, 150, 160)
+                    cv2.putText(frame, label, (x - text_w // 2, bar_y + 23), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 1)
+                
                 # Moving dot = where your head is (smooth)
                 if norm_x is not None and selector._smooth_x is not None:
                     dot_x = bar_margin + int((w - 2 * bar_margin) * selector._smooth_x)
-                    dot_x = max(bar_margin + 6, min(w - bar_margin - 6, dot_x))
-                    cv2.circle(frame, (dot_x, bar_y + bar_h // 2), 5, (0, 255, 220), -1)
-                    cv2.circle(frame, (dot_x, bar_y + bar_h // 2), 5, (255, 255, 255), 1)
-                labels = ["Left", "Right"] if n == 2 else ["Left", "Middle", "Right"]
-                cv2.rectangle(frame, (8, 8), (220, 42), (45, 45, 55), -1)
-                cv2.rectangle(frame, (8, 8), (220, 42), (90, 90, 110), 1)
-                cv2.putText(frame, "Screen: %s" % labels[screen_index], (16, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-                cv2.putText(frame, "q = quit", (w - 100, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 210), 2)
+                    dot_x = max(bar_margin + 8, min(w - bar_margin - 8, dot_x))
+                    # Glow effect
+                    cv2.circle(frame, (dot_x, bar_y + bar_h // 2), 8, (0, 200, 255), -1)
+                    cv2.circle(frame, (dot_x, bar_y + bar_h // 2), 8, (100, 220, 255), 2)
+                    cv2.circle(frame, (dot_x, bar_y + bar_h // 2), 4, (255, 255, 255), -1)
+                # Top status bar
+                # Screen indicator with icon-like appearance
+                cv2.rectangle(frame, (10, 10), (180, 45), (38, 40, 48), -1)
+                cv2.rectangle(frame, (10, 10), (180, 45), (70, 75, 90), 1)
+                status_text = f"📺 {labels[screen_index]}"
+                cv2.putText(frame, status_text, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 170, 240), 2)
+                
+                # Quit hint in corner
+                cv2.putText(frame, "q = quit", (w - 90, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (140, 140, 150), 1)
                 cv2.imshow(tracker_window, frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
