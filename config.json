@@ -5,9 +5,13 @@
   "fps_limit": 24,
   "dwell_seconds": 0.05,
   "smooth_alpha": 0.52,
-  "head_sensitivity": 1.15,
+  "head_sensitivity": 2.0,
   "screen_order": "auto",
-  "cursor_scale": 1.0,
+  "cursor_scale": 1,
   "glasses_reminder_interval": 120,
-  "enable_glasses_reminder": false
+  "enable_glasses_reminder": false,
+  "break_reminder_interval": 12,
+  "enable_break_reminder": true,
+  "eye_strain_reminder_interval": 600,
+  "enable_eye_strain_reminder": true
 }

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import queue
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 from screeninfo import get_monitors
 
@@ -16,9 +19,20 @@ CALIBRATION_FILENAME = "calibration.json"
 CALIBRATION_CAPTURE_SEC = 1.5
 CALIBRATION_MIN_SAMPLES = 20
 
+# BGR colors matching gui/theme.py (dark mode) for calibration and panels
+_CAL_BG_DARK = (36, 29, 26)      # #1a1d24
+_CAL_BG_CARD = (51, 42, 37)      # #252a33
+_CAL_BG_INPUT = (61, 51, 45)     # #2d333d
+_CAL_BORDER = (83, 69, 61)       # #3d4553
+_CAL_ACCENT = (196, 205, 78)     # #4ecdc4
+_CAL_TEXT = (237, 234, 232)      # #e8eaed
+_CAL_TEXT_DIM = (166, 160, 154) # #9aa0a6
+_CAL_KEY_BG = (61, 51, 45)       # same as input
+_CAL_KEY_FG = (200, 230, 220)   # light accent for key letters
+
 
 def _draw_text_panel(frame, lines: list[str], y_start: int = 60, line_height: int = 60, font_scale: float = 1.1, thickness: int = 2, title: str | None = None):
-    """Draw readable text on a dark panel with modern styling. Optimized for visibility."""
+    """Draw readable text on a dark panel with styling matching the main GUI theme."""
     import cv2
     h, w = frame.shape[:2]
     n = len(lines)
@@ -41,12 +55,9 @@ def _draw_text_panel(frame, lines: list[str], y_start: int = 60, line_height: in
     y1 = max(20, y1)
     y2 = y1 + total_height
     
-    # Draw solid background with high contrast
-    cv2.rectangle(frame, (x1, y1), (x2, y2), (30, 33, 40), -1)
-    
-    # Draw bright border
-    border_color = (100, 160, 255)
-    cv2.rectangle(frame, (x1, y1), (x2, y2), border_color, 2)
+    # Panel background and border (match GUI card)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), _CAL_BG_CARD, -1)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), _CAL_ACCENT, 2)
     
     # Draw title if provided
     current_y = y1 + pad_y
@@ -57,13 +68,13 @@ def _draw_text_panel(frame, lines: list[str], y_start: int = 60, line_height: in
         title_x = x1 + (panel_w - title_w) // 2
         title_y = current_y + title_h
         
-        # Title with strong contrast - bright cyan/blue
+        # Title (theme text color, no special chars)
         cv2.putText(frame, title, (title_x, title_y), cv2.FONT_HERSHEY_DUPLEX, title_scale, (0, 0, 0), title_thickness + 2)
-        cv2.putText(frame, title, (title_x, title_y), cv2.FONT_HERSHEY_DUPLEX, title_scale, (120, 200, 255), title_thickness)
+        cv2.putText(frame, title, (title_x, title_y), cv2.FONT_HERSHEY_DUPLEX, title_scale, _CAL_TEXT, title_thickness)
         
-        # Underline
+        # Underline (accent)
         line_y = title_y + 12
-        cv2.line(frame, (x1 + 60, line_y), (x2 - 60, line_y), (100, 160, 255), 2)
+        cv2.line(frame, (x1 + 60, line_y), (x2 - 60, line_y), _CAL_ACCENT, 2)
         current_y = line_y + 25
     
     # Draw lines with better formatting
@@ -73,9 +84,26 @@ def _draw_text_panel(frame, lines: list[str], y_start: int = 60, line_height: in
         
         y = current_y + i * line_height
         
-        # Check if line has a shortcut key format like "C   Description"
+        # Check if line has a shortcut key format like "C   Description" or "SPACE   Description"
         stripped = line.strip()
-        if len(stripped) >= 2 and stripped[0] in 'CSD' and stripped[1:3] == '  ':
+        if stripped.startswith("SPACE  ") or stripped.startswith("SPACE "):
+            key = "SPACE"
+            desc = stripped[5:].lstrip()
+            key_x = x1 + pad_x
+            key_w = 72
+            key_h = line_height - 10
+            cv2.rectangle(frame, (key_x, y - key_h + 5), (key_x + key_w, y + 5), _CAL_KEY_BG, -1)
+            cv2.rectangle(frame, (key_x, y - key_h + 5), (key_x + key_w, y + 5), _CAL_ACCENT, 1)
+            (k_w, k_h), _ = cv2.getTextSize(key, cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.85, thickness)
+            kx = key_x + (key_w - k_w) // 2
+            ky = y - (key_h // 2) + 3
+            cv2.putText(frame, key, (kx, ky), cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.85, (0, 0, 0), thickness + 2)
+            cv2.putText(frame, key, (kx, ky), cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.85, _CAL_KEY_FG, thickness)
+            if desc:
+                desc_x = key_x + key_w + 20
+                cv2.putText(frame, desc, (desc_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness + 2)
+                cv2.putText(frame, desc, (desc_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, _CAL_TEXT, thickness)
+        elif len(stripped) >= 2 and stripped[0] in 'CSD' and stripped[1:3] == '  ':
             # Split into key and description
             key = stripped[0]
             desc = stripped[2:].lstrip()
@@ -85,23 +113,23 @@ def _draw_text_panel(frame, lines: list[str], y_start: int = 60, line_height: in
             key_w = 35
             key_h = line_height - 10
             
-            # Key background (small box)
-            cv2.rectangle(frame, (key_x, y - key_h + 5), (key_x + key_w, y + 5), (60, 60, 70), -1)
-            cv2.rectangle(frame, (key_x, y - key_h + 5), (key_x + key_w, y + 5), (100, 100, 110), 1)
+            # Key background (match GUI button style)
+            cv2.rectangle(frame, (key_x, y - key_h + 5), (key_x + key_w, y + 5), _CAL_KEY_BG, -1)
+            cv2.rectangle(frame, (key_x, y - key_h + 5), (key_x + key_w, y + 5), _CAL_ACCENT, 1)
             
-            # Draw key letter centered
+            # Draw key letter centered (ASCII only)
             (k_w, k_h), _ = cv2.getTextSize(key, cv2.FONT_HERSHEY_SIMPLEX, font_scale * 1.1, thickness + 1)
             kx = key_x + (key_w - k_w) // 2
             ky = y - (key_h // 2) + 3
             cv2.putText(frame, key, (kx, ky), cv2.FONT_HERSHEY_SIMPLEX, font_scale * 1.1, (0, 0, 0), thickness + 2)
-            cv2.putText(frame, key, (kx, ky), cv2.FONT_HERSHEY_SIMPLEX, font_scale * 1.1, (255, 200, 80), thickness + 1)
+            cv2.putText(frame, key, (kx, ky), cv2.FONT_HERSHEY_SIMPLEX, font_scale * 1.1, _CAL_KEY_FG, thickness + 1)
             
-            # Draw description
+            # Description (theme text)
             desc_x = key_x + key_w + 20
             cv2.putText(frame, desc, (desc_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness + 2)
-            cv2.putText(frame, desc, (desc_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (240, 240, 250), thickness)
+            cv2.putText(frame, desc, (desc_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, _CAL_TEXT, thickness)
         elif stripped.startswith('ESC'):
-            # ESC key special handling
+            # ESC key (same style)
             key = 'ESC'
             desc = stripped[3:].lstrip() if len(stripped) > 3 else ''
             
@@ -109,26 +137,23 @@ def _draw_text_panel(frame, lines: list[str], y_start: int = 60, line_height: in
             key_w = 60
             key_h = line_height - 10
             
-            # Key background
-            cv2.rectangle(frame, (key_x, y - key_h + 5), (key_x + key_w, y + 5), (60, 60, 70), -1)
-            cv2.rectangle(frame, (key_x, y - key_h + 5), (key_x + key_w, y + 5), (100, 100, 110), 1)
+            cv2.rectangle(frame, (key_x, y - key_h + 5), (key_x + key_w, y + 5), _CAL_KEY_BG, -1)
+            cv2.rectangle(frame, (key_x, y - key_h + 5), (key_x + key_w, y + 5), _CAL_ACCENT, 1)
             
-            # Draw key
             (k_w, k_h), _ = cv2.getTextSize(key, cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.9, thickness)
             kx = key_x + (key_w - k_w) // 2
             ky = y - (key_h // 2) + 3
             cv2.putText(frame, key, (kx, ky), cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.9, (0, 0, 0), thickness + 2)
-            cv2.putText(frame, key, (kx, ky), cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.9, (255, 200, 80), thickness)
+            cv2.putText(frame, key, (kx, ky), cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.9, _CAL_KEY_FG, thickness)
             
-            # Draw description if any
             if desc:
                 desc_x = key_x + key_w + 20
                 cv2.putText(frame, desc, (desc_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness + 2)
-                cv2.putText(frame, desc, (desc_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (240, 240, 250), thickness)
+                cv2.putText(frame, desc, (desc_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, _CAL_TEXT, thickness)
         else:
-            # Regular line
+            # Regular line (ASCII only)
             cv2.putText(frame, line, (x1 + pad_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness + 2)
-            cv2.putText(frame, line, (x1 + pad_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (240, 240, 250), thickness)
+            cv2.putText(frame, line, (x1 + pad_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, _CAL_TEXT, thickness)
 
 
 def move_cursor(x: int, y: int) -> bool:
@@ -150,6 +175,11 @@ def move_cursor(x: int, y: int) -> bool:
 def load_config(path: Path) -> dict:
     with open(path, "r") as f:
         return json.load(f)
+
+
+def save_config(path: Path, config: dict) -> None:
+    with open(path, "w") as f:
+        json.dump(config, f, indent=2)
 
 
 def get_ordered_monitors(order: str) -> list[tuple[int, int, int, int]]:
@@ -279,7 +309,7 @@ def _center_window(window_name: str, width: int, height: int):
 def show_calibration_choice(cap, num_screens: int) -> str:
     """Show pop-up: C=Calibrate, S=Use saved, D=Defaults. Returns 'calibrate'|'saved'|'defaults'."""
     import cv2
-    window_name = "ScreenGaze — Setup"
+    window_name = "ScreenGaze - Setup"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
     cv2.resizeWindow(window_name, 900, 650)
@@ -291,8 +321,8 @@ def show_calibration_choice(cap, num_screens: int) -> str:
             continue
         h, w = frame.shape[:2]
         overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (w, h), (30, 30, 40), -1)
-        cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
+        cv2.rectangle(overlay, (0, 0), (w, h), _CAL_BG_DARK, -1)
+        cv2.addWeighted(overlay, 0.82, frame, 0.18, 0, frame)
         lines = [
             "C   Calibrate now (map your face to each screen)",
             "S   Use saved calibration" if has_saved else "D   Defaults (no calibration)",
@@ -335,7 +365,7 @@ def run_calibration(
     frame_dt = 1.0 / fps
     labels = ["Left", "Right"] if num_screens == 2 else ["Left", "Middle", "Right"]
     refs: list[float] = []
-    window_name = "ScreenGaze — Calibration"
+    window_name = "ScreenGaze - Calibration"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
     cv2.resizeWindow(window_name, 900, 700)
@@ -354,18 +384,19 @@ def run_calibration(
             frame_ts_ms += ms_per_frame
             h, w = frame.shape[:2]
             overlay = frame.copy()
-            cv2.rectangle(overlay, (0, 0), (w, h), (35, 35, 45), -1)
-            cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+            cv2.rectangle(overlay, (0, 0), (w, h), _CAL_BG_DARK, -1)
+            cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
             _draw_text_panel(frame, [
-                f"Look at your {labels[step]} monitor",
+                "Look at your " + labels[step] + " monitor",
                 "SPACE   Capture your head position",
-            ], y_start=180, line_height=70, font_scale=1.1, thickness=2, title=f"Step {step + 1} of {num_screens}")
+            ], y_start=180, line_height=70, font_scale=1.1, thickness=2, title="Step " + str(step + 1) + " of " + str(num_screens))
             nx = get_head_turn_norm_x(frame, face_landmarker, sensitivity, frame_ts_ms)
             if nx is None:
-                _draw_text_panel(frame, ["⚠️  Position your face in the camera view"], y_start=h // 2 + 40, line_height=44, font_scale=0.85)
-            # Status bar at bottom
-            cv2.rectangle(frame, (0, h - 40), (w, h), (30, 33, 42), -1)
-            cv2.putText(frame, "ESC   Cancel calibration", (30, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (150, 150, 160), 1)
+                _draw_text_panel(frame, ["[!] Position your face in the camera view"], y_start=h // 2 + 40, line_height=44, font_scale=0.85)
+            # Status bar (match GUI theme)
+            cv2.rectangle(frame, (0, h - 44), (w, h), _CAL_BG_CARD, -1)
+            cv2.rectangle(frame, (0, h - 44), (w, h), _CAL_ACCENT, 1)
+            cv2.putText(frame, "ESC   Cancel calibration", (30, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.68, _CAL_TEXT_DIM, 1)
             cv2.imshow(window_name, frame)
             key = cv2.waitKey(30)
             if key != -1:
@@ -387,25 +418,24 @@ def run_calibration(
                 samples.append(nx)
             h, w = frame.shape[:2]
             overlay = frame.copy()
-            cv2.rectangle(overlay, (0, 0), (w, h), (40, 42, 55), -1)
-            cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+            cv2.rectangle(overlay, (0, 0), (w, h), _CAL_BG_DARK, -1)
+            cv2.addWeighted(overlay, 0.88, frame, 0.12, 0, frame)
             progress = (c + 1) / capture_frames
-            _draw_text_panel(frame, [f"Hold still while capturing...", ""], y_start=80, line_height=46, font_scale=0.95, title=f"Capturing {labels[step]} Position")
-            # Progress bar
+            _draw_text_panel(frame, ["Hold still while capturing...", ""], y_start=80, line_height=46, font_scale=0.95, title="Capturing " + labels[step] + " Position")
+            # Progress bar (match GUI slider/theme)
             bar_y = h // 2 + 40
-            bar_height = 24
-            bar_width = min(500, w - 160)
+            bar_height = 26
+            bar_width = min(520, w - 160)
             bar_x = (w - bar_width) // 2
-            # Background
-            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), (45, 48, 58), -1)
-            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), (80, 85, 100), 1)
-            # Progress fill
+            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), _CAL_BG_INPUT, -1)
+            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), _CAL_ACCENT, 1)
             fill_width = int(bar_width * progress)
-            cv2.rectangle(frame, (bar_x + 2, bar_y + 2), (bar_x + fill_width - 2, bar_y + bar_height - 2), (80, 150, 240), -1)
+            if fill_width > 4:
+                cv2.rectangle(frame, (bar_x + 2, bar_y + 2), (bar_x + fill_width - 2, bar_y + bar_height - 2), _CAL_ACCENT, -1)
             # Percentage text
-            pct_text = f"{int(progress * 100)}%"
-            text_x = bar_x + (bar_width - len(pct_text) * 12) // 2
-            cv2.putText(frame, pct_text, (text_x, bar_y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            pct_text = str(int(progress * 100)) + "%"
+            text_x = bar_x + (bar_width - len(pct_text) * 14) // 2
+            cv2.putText(frame, pct_text, (text_x, bar_y + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.72, _CAL_TEXT, 2)
             cv2.imshow(window_name, frame)
             cv2.waitKey(max(1, int(frame_dt * 1000)))
 
@@ -414,18 +444,18 @@ def run_calibration(
         else:
             refs.append((step + 0.5) / num_screens)
 
-    # Show "Calibration complete" then transition to tracker
+    # Show "Calibration complete" (same theme as GUI)
     for _ in range(30):
         ok, frame = cap.read()
         if not ok or frame is None:
             continue
         h, w = frame.shape[:2]
         overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (w, h), (28, 35, 50), -1)
+        cv2.rectangle(overlay, (0, 0), (w, h), _CAL_BG_DARK, -1)
         cv2.addWeighted(overlay, 0.9, frame, 0.1, 0, frame)
         _draw_text_panel(frame, [
             "All positions captured successfully",
-            "Starting head tracking now...",
+            "You can start tracking from the main window.",
         ], y_start=200, line_height=70, font_scale=1.1, thickness=2, title="Calibration Complete")
         cv2.imshow(window_name, frame)
         if cv2.waitKey(50) == 27:
@@ -433,6 +463,171 @@ def run_calibration(
     cv2.destroyAllWindows()
     save_calibration(refs, num_screens)
     return refs
+
+
+def run_calibration_standalone(config_path: Path) -> None:
+    """Run calibration wizard (camera + OpenCV windows). Use from GUI before starting tracking."""
+    import cv2
+    config = load_config(config_path)
+    camera_index = config.get("camera_index", 0)
+    frame_w = config.get("frame_width", 640)
+    frame_h = config.get("frame_height", 480)
+    screen_order = config.get("screen_order", "auto")
+    cursor_scale = config.get("cursor_scale", 1.0)
+    monitors = get_ordered_monitors(screen_order)
+    if len(monitors) < 2:
+        raise RuntimeError("Need at least 2 monitors. Found: " + str(len(monitors)))
+    num_screens = len(monitors)
+    cursor_positions = [center_of_region(*m) for m in monitors]
+
+    def scaled_pos(i: int) -> tuple[int, int]:
+        cx, cy = cursor_positions[i]
+        return (int(cx * cursor_scale), int(cy * cursor_scale))
+
+    cap = cv2.VideoCapture(camera_index)
+    if not cap.isOpened():
+        raise RuntimeError("Could not open camera.")
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, frame_w)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_h)
+    face_mesh = init_face_mesh()
+    try:
+        choice = show_calibration_choice(cap, num_screens)
+        if choice == "calibrate":
+            run_calibration(cap, face_mesh, config, cursor_positions, scaled_pos, num_screens)
+        elif choice == "saved":
+            load_calibration(num_screens)  # just ensure it exists; refs saved to file
+        # else: defaults, nothing to save
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+
+
+def run_tracking_loop(
+    config_path: Path,
+    frame_queue: queue.Queue | None,
+    stop_event: threading.Event,
+    get_config: Callable[[], dict],
+) -> None:
+    """Run tracking in a loop; push frames to frame_queue and exit when stop_event is set.
+    Use from GUI: run this in a daemon thread, pass get_config so GUI can update sensitivity/smoothing.
+    """
+    import cv2
+    config = get_config()
+    camera_index = config.get("camera_index", 0)
+    frame_w = config.get("frame_width", 640)
+    frame_h = config.get("frame_height", 480)
+    fps_limit = config.get("fps_limit", 24)
+    screen_order = config.get("screen_order", "auto")
+    cursor_scale = config.get("cursor_scale", 1.0)
+    monitors = get_ordered_monitors(screen_order)
+    if len(monitors) < 2:
+        return
+    num_screens = len(monitors)
+    cursor_positions = [center_of_region(*m) for m in monitors]
+
+    def scaled_pos(i: int) -> tuple[int, int]:
+        cx, cy = cursor_positions[i]
+        return (int(cx * cursor_scale), int(cy * cursor_scale))
+
+    cap = cv2.VideoCapture(camera_index)
+    if not cap.isOpened():
+        return
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, frame_w)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_h)
+    face_mesh = init_face_mesh()
+    calibration_refs = load_calibration(num_screens)
+    dwell_seconds = config.get("dwell_seconds", 0.05)
+    smooth_alpha = config.get("smooth_alpha", 0.52)
+    selector = ScreenSelector(dwell_seconds, smooth_alpha, num_screens, calibration_refs)
+    move_cursor(*scaled_pos(0))
+    frame_dt = 1.0 / fps_limit if fps_limit else 0.05
+    last_time = time.perf_counter()
+    frame_timestamp_ms = 0
+    ms_per_frame = max(1, int(1000 / fps_limit)) if fps_limit else 33
+    last_screen_index: int | None = None
+    labels = ["Left", "Right"] if num_screens == 2 else ["Left", "Middle", "Right"]
+    # Reminders
+    session_start = time.perf_counter()
+    last_break_reminder = session_start
+    last_eye_strain_reminder = session_start
+    break_reminder_interval = config.get("break_reminder_interval", 1200)
+    eye_strain_reminder_interval = config.get("eye_strain_reminder_interval", 600)
+    enable_break_reminder = config.get("enable_break_reminder", True)
+    enable_eye_strain_reminder = config.get("enable_eye_strain_reminder", True)
+    reminder_overlay_text: str | None = None
+    reminder_overlay_until = 0.0
+    REMINDER_DISPLAY_SEC = 8.0
+    try:
+        while not stop_event.is_set():
+            now = time.perf_counter()
+            dt = now - last_time
+            if dt < frame_dt:
+                time.sleep(min(frame_dt - dt, 0.05))
+                continue
+            last_time = time.perf_counter()
+            frame_timestamp_ms += ms_per_frame
+            config = get_config()
+            head_sensitivity = config.get("head_sensitivity", 1.15)
+            selector.smooth_alpha = config.get("smooth_alpha", 0.52)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            norm_x = get_head_turn_norm_x(frame, face_mesh, head_sensitivity, frame_timestamp_ms)
+            screen_index = selector.update(norm_x, dt)
+            if screen_index != last_screen_index and screen_index < len(cursor_positions):
+                move_cursor(*scaled_pos(screen_index))
+            last_screen_index = screen_index
+            now_sec = time.perf_counter()
+            if reminder_overlay_text and now_sec > reminder_overlay_until:
+                reminder_overlay_text = None
+            if not reminder_overlay_text:
+                if enable_eye_strain_reminder and (now_sec - last_eye_strain_reminder) >= eye_strain_reminder_interval:
+                    reminder_overlay_text = "Eye strain reminder: Look away from the screen for 20 seconds"
+                    reminder_overlay_until = now_sec + REMINDER_DISPLAY_SEC
+                    last_eye_strain_reminder = now_sec
+                elif enable_break_reminder and (now_sec - last_break_reminder) >= break_reminder_interval:
+                    reminder_overlay_text = "Take a break! Step away from the screen for a few minutes"
+                    reminder_overlay_until = now_sec + REMINDER_DISPLAY_SEC
+                    last_break_reminder = now_sec
+            if frame_queue is not None:
+                try:
+                    w, h = frame.shape[1], frame.shape[0]
+                    n = len(cursor_positions)
+                    bar_y, bar_h, bar_margin = h - 36, 32, 12
+                    cv2.rectangle(frame, (bar_margin, bar_y), (w - bar_margin, bar_y + bar_h), (38, 40, 48), -1)
+                    cv2.rectangle(frame, (bar_margin, bar_y), (w - bar_margin, bar_y + bar_h), (70, 75, 90), 1)
+                    seg_w = (w - 2 * bar_margin) // n
+                    cx0 = bar_margin + screen_index * seg_w
+                    cv2.rectangle(frame, (cx0 + 2, bar_y + 2), (cx0 + seg_w - 2, bar_y + bar_h - 2), (70, 140, 220), -1)
+                    for i in range(n):
+                        x = bar_margin + seg_w * i + seg_w // 2
+                        label = labels[i]
+                        text_w = len(label) * 9
+                        text_color = (255, 255, 255) if i == screen_index else (150, 150, 160)
+                        cv2.putText(frame, label, (x - text_w // 2, bar_y + 23), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 1)
+                    status_text = "Screen: " + labels[screen_index]
+                    cv2.rectangle(frame, (10, 10), (180, 45), (38, 40, 48), -1)
+                    cv2.putText(frame, status_text, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 170, 240), 2)
+                    if reminder_overlay_text:
+                        overlay = frame.copy()
+                        cv2.rectangle(overlay, (0, 0), (w, h), (20, 25, 35), -1)
+                        cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+                        _draw_text_panel(frame, [reminder_overlay_text], y_start=h // 2 - 50, line_height=50, font_scale=0.9, thickness=2, title="Reminder")
+                    try:
+                        frame_queue.put_nowait(frame.copy())
+                    except queue.Full:
+                        try:
+                            frame_queue.get_nowait()
+                        except queue.Empty:
+                            pass
+                        try:
+                            frame_queue.put_nowait(frame.copy())
+                        except queue.Full:
+                            pass
+                except Exception:
+                    pass
+    finally:
+        cap.release()
 
 
 class ScreenSelector:
@@ -545,7 +740,7 @@ def run(config_path: Path, no_preview: bool, force_calibrate: bool = False) -> N
 
     frame_dt = 1.0 / fps_limit if fps_limit else 0.05
     last_time = time.perf_counter()
-    tracker_window = "ScreenGaze — Tracker"
+    tracker_window = "ScreenGaze - Tracker"
     cv2.namedWindow(tracker_window, cv2.WINDOW_NORMAL)
     cv2.setWindowProperty(tracker_window, cv2.WND_PROP_TOPMOST, 1)
     cv2.resizeWindow(tracker_window, 640, 480)
@@ -553,6 +748,18 @@ def run(config_path: Path, no_preview: bool, force_calibrate: bool = False) -> N
     last_screen_index: int | None = None
     frame_timestamp_ms = 0
     ms_per_frame = max(1, int(1000 / fps_limit)) if fps_limit else 33
+
+    # Break and eye strain reminders (more frequent eye strain reminders)
+    session_start = time.perf_counter()
+    last_break_reminder = session_start
+    last_eye_strain_reminder = session_start
+    break_reminder_interval = config.get("break_reminder_interval", 1200)  # 20 min default
+    eye_strain_reminder_interval = config.get("eye_strain_reminder_interval", 600)  # 10 min default
+    enable_break_reminder = config.get("enable_break_reminder", True)
+    enable_eye_strain_reminder = config.get("enable_eye_strain_reminder", True)
+    reminder_overlay_text: str | None = None
+    reminder_overlay_until = 0.0
+    REMINDER_DISPLAY_SEC = 8.0
 
     try:
         while True:
@@ -573,6 +780,24 @@ def run(config_path: Path, no_preview: bool, force_calibrate: bool = False) -> N
             if screen_index != last_screen_index and screen_index < len(cursor_positions):
                 move_cursor(*scaled_pos(screen_index))
             last_screen_index = screen_index
+
+            # Check break and eye strain reminders (eye strain more frequent)
+            now_sec = time.perf_counter()
+            if reminder_overlay_text and now_sec > reminder_overlay_until:
+                reminder_overlay_text = None
+            if not reminder_overlay_text:
+                if enable_eye_strain_reminder and (now_sec - last_eye_strain_reminder) >= eye_strain_reminder_interval:
+                    reminder_overlay_text = "Eye strain reminder: Look away from the screen for 20 seconds"
+                    reminder_overlay_until = now_sec + REMINDER_DISPLAY_SEC
+                    last_eye_strain_reminder = now_sec
+                    if no_preview:
+                        print("[ScreenGaze] Eye strain reminder: look away for 20 seconds.", flush=True)
+                elif enable_break_reminder and (now_sec - last_break_reminder) >= break_reminder_interval:
+                    reminder_overlay_text = "Take a break! Step away from the screen for a few minutes"
+                    reminder_overlay_until = now_sec + REMINDER_DISPLAY_SEC
+                    last_break_reminder = now_sec
+                    if no_preview:
+                        print("[ScreenGaze] Break reminder: step away for a few minutes.", flush=True)
 
             if not no_preview:
                 w, h = frame.shape[1], frame.shape[0]
@@ -609,13 +834,19 @@ def run(config_path: Path, no_preview: bool, force_calibrate: bool = False) -> N
                     cv2.circle(frame, (dot_x, bar_y + bar_h // 2), 8, (0, 200, 255), -1)
                     cv2.circle(frame, (dot_x, bar_y + bar_h // 2), 8, (100, 220, 255), 2)
                     cv2.circle(frame, (dot_x, bar_y + bar_h // 2), 4, (255, 255, 255), -1)
-                # Top status bar
-                # Screen indicator with icon-like appearance
+                # Top status bar (use ASCII to avoid ??? for special chars)
                 cv2.rectangle(frame, (10, 10), (180, 45), (38, 40, 48), -1)
                 cv2.rectangle(frame, (10, 10), (180, 45), (70, 75, 90), 1)
-                status_text = f"📺 {labels[screen_index]}"
+                status_text = "Screen: " + labels[screen_index]
                 cv2.putText(frame, status_text, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 170, 240), 2)
-                
+
+                # Reminder overlay (break / eye strain)
+                if reminder_overlay_text:
+                    overlay = frame.copy()
+                    cv2.rectangle(overlay, (0, 0), (w, h), (20, 25, 35), -1)
+                    cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+                    _draw_text_panel(frame, [reminder_overlay_text], y_start=h // 2 - 50, line_height=50, font_scale=0.9, thickness=2, title="Reminder")
+
                 # Quit hint in corner
                 cv2.putText(frame, "q = quit", (w - 90, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (140, 140, 150), 1)
                 cv2.imshow(tracker_window, frame)
