@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from tkinter import Button, Frame, Label, Toplevel
-
-from gui.theme import (
+from screen_gaze.core.face_tracker import run_calibration_standalone
+from screen_gaze.core.face_tracker import get_ordered_monitors, load_calibration, load_config
+from screen_gaze.gui.theme import (
     BG_CARD,
     BG_DARK,
     BORDER,
@@ -76,7 +77,6 @@ class CalibrationDialog:
         )
         btn_calibrate.pack(fill="x", pady=PAD_SM)
 
-        from face_tracker import get_ordered_monitors, load_calibration, load_config
         try:
             config = load_config(self.config_path)
             monitors = get_ordered_monitors(config.get("screen_order", "auto"))
@@ -132,7 +132,6 @@ class CalibrationDialog:
         self.top.grab_release()
         self.top.withdraw()
         try:
-            from face_tracker import run_calibration_standalone
             run_calibration_standalone(self.config_path)
             self.result = "calibrated"
         except Exception:

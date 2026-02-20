@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=64.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "screen-gaze"
+dynamic = ["version"]
+description = "Eye-tracking and screen gaze analysis tool"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {file = "LICENSE"}
+authors = [{name = "Your Name", email = "you@example.com"}]
+keywords = ["eye-tracking", "ai", "computer-vision"]
+dependencies = [
+    "opencv-python>=4.8.0",
+    "mediapipe>=0.10.0",
+    "screeninfo>=0.8.1",
+    "Pillow>=9.0.0"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "black>=23"]
+
+[tool.setuptools.packages.find]
+where = ["src"]  # Scans src/ for packages
+include = ["screen_gaze*"]  # Your package namespace
+exclude = ["tests*", "docs*"]
+namespaces = false
+
+# Package data (non-python files like conf/)
+[tool.setuptools.package-dir]
+"" = "src"
+
+# Include config files
+[tool.setuptools.package-data]
+"screen_gaze" = ["conf/*.json"]
+
+[tool.setuptools.dynamic]
+version = {attr = "screen_gaze.__version__"}
+
+[project.scripts]
+screen-gaze = "screen_gaze.main:main"
