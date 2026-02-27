@@ -1,13 +1,18 @@
 """Main application window for ScreenGaze with modern dark UI."""
 from __future__ import annotations
-
+import json
+import shutil
 import queue
 import threading
 from pathlib import Path
 from tkinter import BooleanVar, DoubleVar, Frame, Label, Scale, StringVar, Tk
 from tkinter import Button, Checkbutton, messagebox
-
-from gui.theme import (
+import cv2
+from PIL import Image, ImageTk
+from screen_gaze.gui.calibration_dialog import CalibrationDialog
+from screen_gaze.core.face_tracker import run_tracking_loop
+from screeninfo import get_monitors
+from screen_gaze.gui.theme import (
     BG_CARD,
     BG_DARK,
     BG_INPUT,
@@ -59,7 +64,6 @@ class MainWindow:
 
     def _load_config(self) -> None:
         try:
-            import json
             with open(self.config_path) as f:
                 self._config = json.load(f)
         except Exception:
@@ -95,7 +99,6 @@ class MainWindow:
         self._config["smooth_alpha"] = 0.52 if self._smoothing_var.get() else 0.0
         self._sync_live_config()
         try:
-            import json
             with open(self.config_path, "w") as f:
                 json.dump(self._config, f, indent=2)
         except Exception:
@@ -257,7 +260,6 @@ class MainWindow:
         self._save_config()
 
     def _on_calibrate(self) -> None:
-        from gui.calibration_dialog import CalibrationDialog
         dialog = CalibrationDialog(self._root, self.config_path)
         self._root.wait_window(dialog.top)
         if dialog.result == "calibrated":
@@ -279,7 +281,6 @@ class MainWindow:
         self._sync_live_config()
         self._frame_queue = queue.Queue(maxsize=6)
         self._stop_event.clear()
-        from face_tracker import run_tracking_loop
         self._tracking_thread = threading.Thread(
             target=run_tracking_loop,
             args=(self.config_path, self._frame_queue, self._stop_event, self._get_config_for_thread),
@@ -303,7 +304,6 @@ class MainWindow:
         self._photo = None
 
     def _check_requirements(self) -> bool:
-        import shutil
         if not shutil.which("xdotool"):
             messagebox.showerror(
                 "Error",
@@ -311,7 +311,7 @@ class MainWindow:
                 "Install it, e.g.:\n  Fedora: sudo dnf install xdotool\n  Ubuntu: sudo apt install xdotool",
             )
             return False
-        from screeninfo import get_monitors
+        
         if len(list(get_monitors())) < 2:
             messagebox.showerror("Error", "ScreenGaze needs at least 2 monitors.")
             return False
@@ -327,8 +327,7 @@ class MainWindow:
         self._preview_job = self._root.after(50, self._poll_preview)
 
     def _show_frame(self, frame) -> None:
-        import cv2
-        from PIL import Image, ImageTk
+        
         try:
             h, w = frame.shape[:2]
             if h <= 0 or w <= 0:
