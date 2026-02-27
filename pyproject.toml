@@ -9,7 +9,7 @@ description = "Eye-tracking and screen gaze analysis tool"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {file = "LICENSE"}
-authors = [{name = "Your Name", email = "you@example.com"}]
+authors = [{name = "Sahil Kumbhar", email = "sahilkumbhar004@gmail.com"}]
 keywords = ["eye-tracking", "ai", "computer-vision"]
 dependencies = [
     "opencv-python>=4.8.0",
