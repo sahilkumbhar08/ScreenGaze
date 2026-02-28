@@ -1,5 +1,8 @@
 # ScreenGaze
 
+[![PyPI version](https://badge.fury.io/py/screen-gaze.svg)](https://pypi.org/project/screen-gaze/)
+[![Downloads](https://img.shields.io/pypi/dm/screen-gaze)](https://pypi.org/project/screen-gaze/)
+
 Move your cursor to the screen you're looking at. Uses your webcam and head pose to switch between monitors—no need to drag the mouse. All processing is local; no video is sent over the network.
 
 ---
